@@ -1,0 +1,192 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use feature qw[say signatures];
+no warnings 'experimental::signatures';
+
+use lib 'lib';
+use builtin 'trim';
+
+use Flickr::Schema;
+use Path::Tiny;
+use JSON::MaybeXS;
+use Getopt::Long qw(GetOptions);
+
+my $allow_updates = 0;
+
+GetOptions(
+  'allow-updates' => \$allow_updates,
+) or die "Usage: $0 [--allow-updates] METADATA_FILE [DB_PATH]\n";
+
+my $meta_path = path( shift @ARGV // '' )
+  or die "Usage: $0 [--allow-updates] METADATA_FILE [DB_PATH]\n";
+
+die "Metadata file $meta_path does not exist\n"
+  unless $meta_path->exists;
+
+my $db_path = shift @ARGV;    # optional; falls back to $ENV{FLICKR_DB_PATH}
+
+my $schema = Flickr::Schema->get_schema($db_path);
+
+# ----- read & decode JSON -------------------------------------------------
+
+my $json_text = $meta_path->slurp_utf8;
+my $data = decode_json($json_text);
+
+# ----- derive file_name from metadata filename ----------------------------
+
+my $file_name = $meta_path->basename;   # e.g. 51427544778.jpg.metadata
+$file_name =~ s/\.metadata\z//;         # -> 51427544778.jpg
+
+# ----- upsert photo row ---------------------------------------------------
+
+my $photo_rs = $schema->resultset('Photo');
+
+my %photo_columns = (
+  id                     => $data->{id},
+  owner                  => $data->{owner},
+  secret                 => $data->{secret},
+  server                 => $data->{server},
+  farm                   => $data->{farm},
+
+  title                  => $data->{title},
+  description            => $data->{description}{_content},
+
+  is_public              => $data->{ispublic},
+  is_friend              => $data->{isfriend},
+  is_family              => $data->{isfamily},
+
+  license                => $data->{license},
+
+  o_width                => $data->{o_width},
+  o_height               => $data->{o_height},
+
+  date_upload            => $data->{dateupload},
+  last_update            => $data->{lastupdate},
+  date_taken             => $data->{datetaken},
+  date_taken_granularity => $data->{datetakengranularity},
+  date_taken_unknown     => $data->{datetakenunknown},
+
+  owner_name             => $data->{ownername},
+  icon_server            => $data->{iconserver},
+  icon_farm              => $data->{iconfarm},
+
+  views                  => $data->{views},
+
+  original_secret        => $data->{originalsecret},
+  original_format        => $data->{originalformat},
+
+  latitude               => $data->{latitude},
+  longitude              => $data->{longitude},
+  accuracy               => $data->{accuracy},
+  context                => $data->{context},
+
+  media                  => $data->{media},
+  media_status           => $data->{media_status},
+
+  file_name              => $file_name,
+);
+
+# ----- upsert photo row ---------------------------------------------------
+
+my $photo;
+
+my $existing = $photo_rs->find({ id => $data->{id} });
+
+if ($existing) {
+  if ($allow_updates) {
+    $schema->txn_do(sub {
+      $existing->update(\%photo_columns);
+      $photo = $existing;
+      handle_tags($data, $photo);
+    });
+  } else {
+    # Skip everything for existing photo when updates are disabled
+    # (No tag/machine_tag work either – fast path.)
+    # Optional: say something if you like.
+    say "Skipping existing photo " . $existing->id;
+    exit 0;
+  }
+} else {
+  $schema->txn_do(sub {
+    $photo = $photo_rs->create(\%photo_columns);
+    handle_tags($data, $photo);
+  });
+}
+
+say "Imported photo " . $photo->id . " from $meta_path";
+
+# ----- tags and machine_tags ---------------------------------------------
+
+sub handle_tags ($data, $photo) {
+
+  my $schema = $photo->result_source->schema;
+
+  $photo->photo_tags->delete;
+  $photo->photo_machine_tags->delete;
+
+  my $tags_str         = $data->{tags}         // '';
+  my $machine_tags_str = $data->{machine_tags} // '';
+
+  $tags_str         = trim($tags_str);
+  $machine_tags_str = trim($machine_tags_str);
+
+  my @plain_tags;
+  my @machine_tags;
+
+  # Helper: detect Flickr machine-tag pattern ns:pred=value
+  my $is_machine = sub {
+    my ($t) = @_;
+    return $t =~ /^[^:]+:[^=]+=.+$/ ? 1 : 0;
+  };
+
+  # From 'tags' field: split, classify
+  if (length $tags_str) {
+    for my $t (split /\s+/, $tags_str) {
+      next unless length $t;
+      if ( $is_machine->($t) ) {
+        push @machine_tags, $t;
+      } else {
+        push @plain_tags, $t;
+      }
+    }
+  }
+
+  # From 'machine_tags' field: all of these are machine tags
+  if (length $machine_tags_str) {
+    for my $t (split /\s+/, $machine_tags_str) {
+      next unless length $t;
+      push @machine_tags, $t;
+    }
+  }
+
+  # De-duplicate
+  my %seen;
+  @plain_tags    = grep { !$seen{plain}{$_}++    } @plain_tags;
+  @machine_tags  = grep { !$seen{machine}{$_}++ } @machine_tags;
+
+  my $tag_rs           = $schema->resultset('Tag');
+  my $mtag_rs          = $schema->resultset('MachineTag');
+
+  # Plain tags -> tag + photo_tag
+  for my $tag (@plain_tags) {
+    my $tag_row = $tag_rs->find_or_create({ name => $tag });
+
+    $photo->add_to_tags($tag_row);
+  }
+
+  # Machine tags -> machine_tag + photo_machine_tag
+  for my $raw (@machine_tags) {
+    my ($ns_pred, $value) = split /=/, $raw, 2;
+    my ($ns, $pred)       = split /:/, $ns_pred, 2;
+
+    my $mtag_row = $mtag_rs->find_or_create({
+      raw       => $raw,
+      namespace => $ns,
+      predicate => $pred,
+      value     => $value,
+    });
+
+    $photo->add_to_machine_tags($mtag_row);
+  }
+}

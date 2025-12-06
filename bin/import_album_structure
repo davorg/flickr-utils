@@ -1,0 +1,108 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use feature 'say';
+
+use lib 'lib';
+use builtin 'trim';
+use Path::Tiny qw(path);
+use Getopt::Long qw(GetOptions);
+
+use Flickr::Schema;
+
+my $root   = '.';
+my $dbpath;
+
+GetOptions(
+  'root=s' => \$root,
+  'db=s'   => \$dbpath,
+) or die "Usage: $0 [--root DIR] [--db DB_PATH]\n";
+
+my $rootdir    = path($root)->absolute;
+my $albums_dir = $rootdir->child('Albums');
+
+die "No Albums/ under $rootdir\n" unless $albums_dir->is_dir;
+
+my $schema = Flickr::Schema->get_schema($dbpath);
+
+my $coll_rs       = $schema->resultset('Collection');
+my $album_rs      = $schema->resultset('Album');
+my $photo_rs      = $schema->resultset('Photo');
+my $album_photo_rs = $schema->resultset('AlbumPhoto');
+
+my $album_count  = 0;
+my $link_count   = 0;
+
+for my $album_dir ($albums_dir->children) {
+    next unless $album_dir->is_dir;
+
+    my $dir_name = $album_dir->basename;
+
+    my ($coll_name, $album_name);
+    if ($dir_name =~ /:/) {
+        my ($c, $a) = split /:/, $dir_name, 2;
+        $coll_name  = trim($c);
+        $album_name = trim($a);
+    } else {
+        $album_name = $dir_name;
+    }
+
+    my $collection;
+    if (defined $coll_name && length $coll_name) {
+        $collection = $coll_rs->find_or_create({ name => $coll_name });
+    }
+
+    my $album = $album_rs->find_or_create({
+        name          => $album_name,
+        collection_id => $collection ? $collection->id : undef,
+    });
+
+    $album_count++;
+
+    # For idempotency, clear existing mappings for this album then rebuild
+    $album_photo_rs->search({ album_id => $album->id })->delete;
+
+    # Walk this album's directory entries
+    for my $entry ($album_dir->children) {
+        next unless $entry->is_file || -l $entry;
+
+        my $file_name;
+
+        if (-l $entry) {
+            # It's a symlink: follow it and take the basename
+            my $target = readlink($entry->stringify);
+            unless (defined $target) {
+                warn "readlink failed for $entry: $!";
+                next;
+            }
+            $file_name = path($target)->basename;   # e.g. 1234567890.jpg
+        } else {
+            # Plain file in the album dir
+            $file_name = $entry->basename;
+        }
+
+        my $photo = $photo_rs->find({ file_name => $file_name });
+        unless ($photo) {
+            warn "No photo row for file_name=$file_name (album '$dir_name')\n";
+            next;
+        }
+
+        my $position;
+        if ($entry->basename =~ /^(\d+)_/) {
+            $position = $1;
+        }
+
+        $album_photo_rs->create({
+            album_id => $album->id,
+            photo_id => $photo->id,
+            position => $position,
+        });
+
+        $link_count++;
+    }
+
+    say "Imported album '$dir_name' as album_id=", $album->id;
+}
+
+say "Done. Albums: $album_count, album/photo links: $link_count";
+

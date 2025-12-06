@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 \"Album Name\"" >&2
+  exit 1
+fi
+
+# Allow spaces in album names without needing to quote every word
+album="$*"
+
+src="./Albums/$album"
+dest="gphotos:album/$album"
+done_src="${src} - Done"
+
+if [ ! -d "$src" ]; then
+  echo "Error: album directory not found: $src" >&2
+  exit 1
+fi
+
+if [ -d "$done_src" ]; then
+  echo "Warning: target 'done' directory already exists: $done_src" >&2
+  echo "Not doing anything; please resolve this manually." >&2
+  exit 1
+fi
+
+echo "Uploading album:"
+echo "  Local : $src"
+echo "  Remote: $dest"
+echo
+
+# If rclone is interrupted (Ctrl-C) or fails, we *don't* rename
+if rclone copy -L "$src" "$dest" --progress --include '*.jpg' --include '*.jpeg' --include '*.png'; then
+  echo
+  echo "Upload succeeded; renaming album directory to mark as done:"
+  echo "  $src -> $done_src"
+  mv "$src" "$done_src"
+else
+  echo
+  echo "rclone failed or was interrupted; NOT renaming $src" >&2
+  exit 1
+fi
+

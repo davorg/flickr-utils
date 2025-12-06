@@ -1,0 +1,52 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+use DBIx::Class::Schema::Loader qw/make_schema_at/;
+
+make_schema_at(
+    'Flickr::Schema',
+    {
+        dump_directory => './lib',
+
+        # Generate Moose-based classes
+        use_moose      => 1,
+
+        # Load InflateColumn::DateTime into Result classes
+        components     => ['InflateColumn::DateTime'],
+
+        # Optional: generated ResultSet classes
+        resultset_namespace => 'ResultSet',
+
+        # Add per-column tweaks
+        custom_column_info => sub {
+            my ($table, $column_name, $column_info) = @_;
+
+            # Our DB has date/time-ish values in these columns.
+            # 'date_taken' is a 'YYYY-MM-DD HH:MM:SS' TEXT column, so we can
+            # safely let DBIC inflate it to DateTime.
+            if ($column_name eq 'date_taken') {
+                return {
+                    inflate_datetime  => 1,
+                    datetime_timezone => 'UTC',   # or your preferred TZ
+                };
+            }
+
+            # You *could* also try to inflate epoch ints like date_upload /
+            # last_update, but that wants a custom parser; leave them as ints
+            # for now and handle conversion manually in code if you need it.
+
+            return {}; # no extra attributes for other columns
+        },
+    },
+    [
+        'dbi:SQLite:dbname=db/flickr_db.sqlite',
+        '',    # user
+        '',    # pass
+        {
+            sqlite_unicode  => 1,
+            on_connect_call => 'use_foreign_keys',
+        },
+    ],
+);
+

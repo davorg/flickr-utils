@@ -1,0 +1,107 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use feature 'say';
+
+use lib 'lib';
+
+use Getopt::Long qw(GetOptions);
+use App::FlickrExifEnricher;
+
+my $root    = '.';
+my $db_path;
+my $dry_run = 0;
+my $force   = 0;
+
+my %categories = (
+  date         => 0,
+  location     => 0,
+  description  => 0,
+  tags         => 0,
+  'machine-tags' => 0,
+  author       => 0,
+  license      => 0,
+);
+
+my $all = 0;
+my ($id, $file);
+
+GetOptions(
+  'root=s'        => \$root,
+  'db=s'          => \$db_path,
+  'dry-run!'      => \$dry_run,
+  'force!'        => \$force,
+
+  'date!'         => \$categories{date},
+  'location!'     => \$categories{location},
+  'description!'  => \$categories{description},
+  'tags!'         => \$categories{tags},
+  'machine-tags!' => \$categories{'machine-tags'},
+  'author!'       => \$categories{author},
+  'license!'      => \$categories{license},
+
+  'all!'          => \$all,
+
+  'id=s'          => \$id,
+  'file=s'        => \$file,
+) or die usage();
+
+# --id and --file are mutually exclusive
+if (defined $id && defined $file) {
+  die "--id and --file are mutually exclusive; please use only one\n";
+}
+
+# If --all is set, enable all categories
+if ($all) {
+  $_ = 1 for values %categories;
+}
+
+# Build a hash of enabled categories
+my %enabled = map { $_ => $categories{$_} ? 1 : 0 } keys %categories;
+
+# Build WHERE clause (if any) for a single photo
+my $where;
+if (defined $id) {
+  $where = { id => $id };
+} elsif (defined $file) {
+  $where = { file_name => $file };
+} else {
+  $where = undef;    # all photos
+}
+
+my $enricher = App::FlickrExifEnricher->new(
+  root       => $root,
+  db_path    => $db_path,
+  dry_run    => $dry_run,
+  force      => $force,
+  categories => \%enabled,
+  where      => $where,
+);
+
+$enricher->run;
+
+sub usage {
+  return <<"USAGE";
+Usage: $0 [options]
+
+Options:
+  --root DIR           Root of flickrmirrorer tree (default .; expects photostream/ under it)
+  --db PATH            Path to flickr_db.sqlite (defaults to \$FLICKR_DB_PATH via Flickr::Schema)
+
+  --dry-run            Show what would be changed, but don't call exiftool
+  --force              Overwrite existing metadata for selected categories
+
+  Category selectors (if none supplied, all are enabled):
+    --date             Write EXIF date from date_taken
+    --location         Write GPS coordinates from latitude/longitude
+    --description      Write title/description fields
+    --tags             Write Flickr tags as Keywords/Subject
+    --machine-tags     Write Flickr machine tags as extra Keywords/Subject
+    --author           Write author/creator fields
+    --license          Write licence info from Flickr license code
+
+  --all                Enable all categories above
+
+USAGE
+}
+

@@ -1,0 +1,70 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use feature 'say';
+
+use lib 'lib';
+use Path::Tiny qw(path);
+use Getopt::Long qw(GetOptions);
+use Flickr::Schema;
+
+my $root   = '.';
+my $dbpath;
+my $dry_run = 0;
+
+GetOptions(
+  'root=s'   => \$root,
+  'db=s'     => \$dbpath,
+  'dry-run!' => \$dry_run,
+) or die "Usage: $0 [--root DIR] [--db DB_PATH] [--dry-run]\n";
+
+my $rootdir     = path($root)->absolute;
+my $photostream = $rootdir->child('photostream');
+
+my $schema = Flickr::Schema->get_schema($dbpath);
+
+# Photos with missing EXIF date but a known Flickr date_taken
+my $rs = $schema->resultset('Photo')->search({
+  exif_datetime_original => undef,
+  date_taken             => { '!=' => undef },
+});
+
+my $updated = 0;
+
+while (my $photo = $rs->next) {
+  my $file = $photostream->child($photo->file_name);
+  next unless $file->exists;
+
+  my $dt = $photo->date_taken;      # "YYYY-MM-DD HH:MM:SS"
+  next unless $dt;
+
+  my $exif_dt = $dt->strftime('%Y:%m:%d %H:%M:%S');
+
+  say +($dry_run ? "[DRY RUN] " : ""), "Setting EXIF date on ", $file->stringify, " -> $exif_dt";
+
+  if (!$dry_run) {
+    my @cmd = (
+      'exiftool',
+      '-overwrite_original',
+      "-DateTimeOriginal=$exif_dt",
+      "-CreateDate=$exif_dt",
+      $file->stringify,
+    );
+
+    system @cmd;
+    if ($? == 0) {
+      $photo->update({
+        exif_datetime_original => $exif_dt,
+        exif_create_date       => $exif_dt,
+      });
+      $updated++;
+    } else {
+      warn "exiftool failed for " . $file->stringify . " (exit $?)\n";
+    }
+  }
+}
+
+say $dry_run
+  ? "Dry run complete."
+  : "Updated EXIF dates on $updated photos.";
+
